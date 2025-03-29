@@ -11,45 +11,52 @@ Window {
     title: qsTr("MQTT订阅")
     id: root
 
+    // 核心属性
     property var tempSubscription: 0
     property var parsedData: ({})
     property int currentGroup: 0
     property var availableGroups: []
     property bool initialLoad: true
     property int maxMessages: 100
-    property int autoCleanInterval: 6000 // 自动清理间隔
+    property int autoCleanInterval: 1 // 默认1分钟（用户看到的单位）
+    property int internalCleanupInterval: autoCleanInterval * 60000 // 内部使用的毫秒数
+    property var customLabels: ({})      // 存储自定义标签
+    property var customUnits: ({})       // 存储自定义单位
+    property var dataHistory: ({})       // 存储数据历史记录
+    property var recordIntervals: ({})   // 存储数据记录间隔
 
-    // 存储自定义标签和单位
-    property var customLabels: ({})
-    property var customUnits: ({})
-    // 存储数据历史记录
-    property var dataHistory: ({})
-    // 存储数据记录间隔
-    property var recordIntervals: ({})
-
+    // MQTT客户端
     MqttClient {
         id: client
         hostname: hostnameField.text
         port: portField.text
     }
 
+    // 消息列表模型
     ListModel {
         id: messageModel
+    }
+
+    // 可视化数据模型
+    ListModel {
+        id: visualizationModel
     }
 
     // 自动清理定时器
     Timer {
         id: cleanupTimer
-        interval: root.autoCleanInterval
-        running: messageModel.count > 0 // 仅当有消息时运行
+        interval: root.internalCleanupInterval
+        running: true // 始终运行，通过条件控制是否执行清理
         repeat: true
         onTriggered: {
-            console.log("Auto cleanup triggered. Clearing message model.")
-            messageModel.clear()
-            console.log("Messages cleared.")
+            if (messageModel.count > 0) {
+                console.log("Auto cleanup triggered at", new Date().toLocaleTimeString())
+                messageModel.clear()
+            }
         }
     }
 
+    // 核心函数：解析数据
     function parseData(payload) {
         try {
             const data = JSON.parse(payload);
@@ -75,26 +82,21 @@ Window {
         }
     }
 
+    // 更新可视化数据
     function updateVisualization() {
         if (availableGroups.length === 0) return;
 
         const groupKey = availableGroups[currentGroup];
         const groupData = parsedData[groupKey];
 
-        // 清空现有模型
         visualizationModel.clear();
 
-        // 使用保存的数据填充模型
         if (Array.isArray(groupData)) {
             for (let i = 0; i < groupData.length; i++) {
-                // 为每个数据项生成唯一ID - 包含组名和索引
                 const itemId = groupKey + "_" + i;
-
-                // 查找是否有保存的自定义标签和单位
                 let label = "Value " + (i + 1);
                 let unit = "";
 
-                // 检查是否有存储的自定义值 - 使用完整的 itemId
                 if (root.customLabels[itemId]) {
                     label = root.customLabels[itemId];
                 }
@@ -114,20 +116,17 @@ Window {
         }
     }
 
+    // 添加消息
     function addMessage(payload) {
-        messageModel.insert(0, {"payload": payload});
+        messageModel.insert(0, {"payload": payload})
 
-        if (messageModel.count >= maxMessages)
-            messageModel.remove(maxMessages - 1);
+        if (messageModel.count >= maxMessages) {
+            messageModel.remove(maxMessages - 1)
+        }
 
-        // 重置自动清理定时器
-        cleanupTimer.restart();
-
-        // Try to parse the message as JSON data
-        parseData(payload);
+        parseData(payload)
     }
-
-    // 创建曲线图窗口的组件
+    // 曲线图窗口组件
     Component {
         id: chartWindowComponent
         Window {
@@ -141,7 +140,6 @@ Window {
             property int recordInterval: 1000
             
             onClosing: {
-                // 关闭窗口时停止记录和清理数据
                 isRecording = false;
                 if (dataHistory[currentItemId]) {
                     dataHistory[currentItemId].isRecording = false;
@@ -157,13 +155,12 @@ Window {
                 anchors.margins: 10
                 spacing: 10
 
+                // 控制面板
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 10
 
-                    Label {
-                        text: "记录间隔(ms):"
-                    }
+                    Label { text: "记录间隔(ms):" }
 
                     SpinBox {
                         id: intervalSpinBox
@@ -213,6 +210,7 @@ Window {
                     }
                 }
 
+                // 图表视图
                 ChartView {
                     id: chartView
                     Layout.fillWidth: true
@@ -236,46 +234,45 @@ Window {
                         axisY: axisY
                         name: chartWindow.title
                     }
+                }
+            }
 
-                    Timer {
-                        id: updateTimer
-                        interval: 500
-                        running: chartWindow.visible && chartWindow.isRecording
-                        repeat: true
-                        onTriggered: {
-                            if (chartWindow.currentItemId && dataHistory[chartWindow.currentItemId] && dataHistory[chartWindow.currentItemId].isRecording) {
-                                const data = dataHistory[chartWindow.currentItemId].data;
-                                lineSeries.clear();
-                                if (data.length > 0) {
-                                    // 更新X轴范围
-                                    const firstTime = data[0].timestamp;
-                                    const lastTime = data[data.length - 1].timestamp;
-                                    axisX.min = new Date(firstTime);
-                                    axisX.max = new Date(lastTime);
+            // 图表更新定时器
+            Timer {
+                id: updateTimer
+                interval: 500
+                running: chartWindow.visible && chartWindow.isRecording
+                repeat: true
+                onTriggered: {
+                    if (chartWindow.currentItemId && dataHistory[chartWindow.currentItemId] && dataHistory[chartWindow.currentItemId].isRecording) {
+                        const data = dataHistory[chartWindow.currentItemId].data;
+                        lineSeries.clear();
+                        if (data.length > 0) {
+                            // 更新X轴范围
+                            const firstTime = data[0].timestamp;
+                            const lastTime = data[data.length - 1].timestamp;
+                            axisX.min = new Date(firstTime);
+                            axisX.max = new Date(lastTime);
 
-                                    // 更新Y轴范围
-                                    let minY = data[0].value;
-                                    let maxY = data[0].value;
+                            // 更新Y轴范围
+                            let minY = data[0].value;
+                            let maxY = data[0].value;
 
-                                    // 绘制数据点
-                                    data.forEach(point => {
-                                        lineSeries.append(point.timestamp, point.value);
-                                        minY = Math.min(minY, point.value);
-                                        maxY = Math.max(maxY, point.value);
-                                    });
+                            // 绘制数据点
+                            data.forEach(point => {
+                                lineSeries.append(point.timestamp, point.value);
+                                minY = Math.min(minY, point.value);
+                                maxY = Math.max(maxY, point.value);
+                            });
 
-                                    // 设置Y轴范围 - 处理值相同的情况
-                                    if (minY === maxY) {
-                                        // 当所有值相同时，设置合理的范围
-                                        axisY.min = minY - 1;  // 向下扩展1个单位
-                                        axisY.max = maxY + 1;  // 向上扩展1个单位
-                                    } else {
-                                        // 正常情况，添加10%边距
-                                        const padding = (maxY - minY) * 0.1;
-                                        axisY.min = minY - padding;
-                                        axisY.max = maxY + padding;
-                                    }
-                                }
+                            // 设置Y轴范围
+                            if (minY === maxY) {
+                                axisY.min = minY - 1;
+                                axisY.max = maxY + 1;
+                            } else {
+                                const padding = (maxY - minY) * 0.1;
+                                axisY.min = minY - padding;
+                                axisY.max = maxY + padding;
                             }
                         }
                     }
@@ -307,7 +304,7 @@ Window {
         }
     }
 
-    // 编辑对话框组件
+    // 编辑对话框
     Dialog {
         id: editDialog
         title: "Edit Data"
@@ -323,11 +320,8 @@ Window {
 
         onAccepted: {
             if (currentIndex >= 0 && currentIndex < visualizationModel.count) {
-                // 更新模型中的标签和单位
                 visualizationModel.setProperty(currentIndex, "label", labelEditField.text)
                 visualizationModel.setProperty(currentIndex, "unit", unitEditField.text)
-
-                // 保存自定义标签和单位到全局属性 - 使用完整的 itemId
                 root.customLabels[currentItemId] = labelEditField.text;
                 root.customUnits[currentItemId] = unitEditField.text;
             }
@@ -337,78 +331,31 @@ Window {
             width: parent.width
             spacing: 15
 
-            // 显示值（不可编辑）
             RowLayout {
                 Layout.fillWidth: true
-
-                Label {
-                    text: "值:"
-                    Layout.preferredWidth: 80
-                    font.pixelSize: 14
-                }
-
-                Label {
-                    id: valueDisplay
-                    text: ""
-                    font.pixelSize: 16
-                    font.bold: true
-                }
+                Label { text: "值:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
+                Label { id: valueDisplay; text: ""; font.pixelSize: 16; font.bold: true }
             }
 
-            // 显示组信息和项目索引
             RowLayout {
                 Layout.fillWidth: true
-
-                Label {
-                    text: "组 ID:"
-                    Layout.preferredWidth: 80
-                    font.pixelSize: 14
-                }
-
-                Label {
-                    id: itemIdDisplay
-                    text: ""
-                    font.pixelSize: 14
-                    elide: Text.ElideRight
-                }
+                Label { text: "组 ID:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
+                Label { id: itemIdDisplay; text: ""; font.pixelSize: 14; elide: Text.ElideRight }
             }
 
-            // 标签编辑
             RowLayout {
                 Layout.fillWidth: true
-
-                Label {
-                    text: "标签:"
-                    Layout.preferredWidth: 80
-                    font.pixelSize: 14
-                }
-
-                TextField {
-                    id: labelEditField
-                    Layout.fillWidth: true
-                    placeholderText: "输入 标签"
-                }
+                Label { text: "标签:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
+                TextField { id: labelEditField; Layout.fillWidth: true; placeholderText: "输入 标签" }
             }
 
-            // 单位编辑
             RowLayout {
                 Layout.fillWidth: true
-
-                Label {
-                    text: "单位:"
-                    Layout.preferredWidth: 80
-                    font.pixelSize: 14
-                }
-
-                TextField {
-                    id: unitEditField
-                    Layout.fillWidth: true
-                    placeholderText: "输入 单位"
-                }
+                Label { text: "单位:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
+                TextField { id: unitEditField; Layout.fillWidth: true; placeholderText: "输入 单位" }
             }
         }
 
-        // 打开对话框并预填充数据
         function openForEdit(index, itemId, value, label, unit) {
             currentIndex = index
             currentItemId = itemId
@@ -425,16 +372,13 @@ Window {
         }
     }
 
-    ListModel {
-        id: visualizationModel
-    }
-
+    // 主布局
     StackLayout {
         id: mainLayout
         anchors.fill: parent
         currentIndex: 0
 
-        // First page - MQTT Connection
+        // 第一页 - MQTT连接
         Item {
             GridLayout {
                 anchors.fill: parent
@@ -468,7 +412,6 @@ Window {
                     enabled: client.state === MqttClient.Disconnected
                 }
 
-                // 自动清理设置
                 Label {
                     text: "自动清理（分钟）:"
                     enabled: client.state === MqttClient.Disconnected
@@ -477,16 +420,16 @@ Window {
                 TextField {
                     id: cleanupField
                     Layout.fillWidth: true
-                    text: (root.autoCleanInterval / 1000).toString()
-                    placeholderText: "<Seconds>"
+                    text: root.autoCleanInterval.toString()
+                    placeholderText: "<分钟>"
                     inputMethodHints: Qt.ImhDigitsOnly
                     enabled: client.state === MqttClient.Disconnected
                     onTextChanged: {
                         if (text.length > 0 && parseInt(text) > 0) {
-                            root.autoCleanInterval = parseInt(text) * 1000
-                            if (cleanupTimer.running) {
-                                cleanupTimer.restart()
-                            }
+                            root.autoCleanInterval = parseInt(text)
+                            root.internalCleanupInterval = root.autoCleanInterval * 60000
+                            cleanupTimer.interval = root.internalCleanupInterval
+                            console.log("Cleanup interval set to", root.autoCleanInterval, "minutes")
                         }
                     }
                 }
@@ -520,9 +463,7 @@ Window {
                     Layout.columnSpan: 2
                     Layout.fillWidth: true
 
-                    Label {
-                        text: "主题:"
-                    }
+                    Label { text: "主题:" }
 
                     TextField {
                         id: subField
@@ -542,7 +483,6 @@ Window {
                             }
                             tempSubscription = client.subscribe(subField.text)
                             tempSubscription.messageReceived.connect(addMessage)
-                            // 启动自动清理定时器
                             cleanupTimer.start()
                         }
                     }
@@ -576,7 +516,6 @@ Window {
                     }
                 }
 
-                // 手动清理按钮
                 Button {
                     id: clearButton
                     text: "清理"
@@ -589,20 +528,16 @@ Window {
 
                 Label {
                     function stateToString(value) {
-                        if (value === 0)
-                            return "Disconnected"
-                        else if (value === 1)
-                            return "Connecting"
-                        else if (value === 2)
-                            return "Connected"
-                        else
-                            return "Unknown"
+                        if (value === 0) return "未连接"
+                        else if (value === 1) return "连接中"
+                        else if (value === 2) return "已连接"
+                        else return "未知"
                     }
 
                     Layout.columnSpan: 2
                     Layout.fillWidth: true
                     color: "#333333"
-                    text: "Status: " + stateToString(client.state) + " (" + client.state + ")"
+                    text: "状态: " + stateToString(client.state)
                 }
 
                 Button {
@@ -617,7 +552,7 @@ Window {
             }
         }
 
-        // Second page - Data Visualization
+        // 第二页 - 数据可视化
         Item {
             GridLayout {
                 anchors.fill: parent
@@ -674,8 +609,6 @@ Window {
                         columns: 2
                         columnSpacing: 20
                         rowSpacing: 20
-
-                        // Make sure last item spans both columns if odd number of items
                         property bool hasOddItems: visualizationModel.count % 2 === 1
 
                         Repeater {
@@ -698,19 +631,16 @@ Window {
                                     anchors.margins: 10
                                     spacing: 10
 
-                                    // 数据显示布局
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: 5
 
-                                        // 标签
                                         Text {
                                             text: model.label
                                             font.pixelSize: 14
                                             color: "#666666"
                                         }
 
-                                        // 值
                                         Text {
                                             text: model.value.toFixed(2)
                                             font.pixelSize: 16
@@ -718,7 +648,6 @@ Window {
                                             Layout.alignment: Qt.AlignLeft
                                         }
 
-                                        // 单位
                                         Text {
                                             text: model.unit
                                             font.pixelSize: 14
@@ -726,10 +655,8 @@ Window {
                                             visible: model.unit !== ""
                                         }
 
-                                        // 填充空间
                                         Item { Layout.fillWidth: true }
 
-                                        // 添加曲线图按钮
                                         Button {
                                             id: chartButton
                                             text: "曲线图"
@@ -737,18 +664,17 @@ Window {
                                                 var window = chartWindowComponent.createObject(root);
                                                 window.currentItemId = model.itemId;
                                                 window.title = model.label + " - 数据曲线";
-                                                window.recordInterval = recordIntervals[model.itemId] || 1000; // 默认1秒
-                                                window.isRecording = false; // 默认不开始记录
+                                                window.recordInterval = recordIntervals[model.itemId] || 1000;
+                                                window.isRecording = false;
                                                 window.show();
                                             }
                                         }
                                     }
                                 }
 
-                                // 双击打开编辑对话框
                                 MouseArea {
                                     anchors.fill: parent
-                                    anchors.rightMargin: chartButton.width + 10 // 避开按钮区域
+                                    anchors.rightMargin: chartButton.width + 10
                                     onDoubleClicked: {
                                         editDialog.openForEdit(index, model.itemId, model.value, model.label, model.unit)
                                     }
