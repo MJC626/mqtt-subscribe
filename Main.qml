@@ -22,6 +22,7 @@ Window {
     property int internalCleanupInterval: autoCleanInterval * 60000 // 内部使用的毫秒数
     property var customLabels: ({})      // 存储自定义标签
     property var customUnits: ({})       // 存储自定义单位
+    property var customFormulas: ({})    // 存储自定义公式
     property var dataHistory: ({})       // 存储数据历史记录
     property var recordIntervals: ({})   // 存储数据记录间隔
 
@@ -53,6 +54,27 @@ Window {
                 console.log("Auto cleanup triggered at", new Date().toLocaleTimeString())
                 messageModel.clear()
             }
+        }
+    }
+
+    // 解析并计算数学表达式
+    function evaluateFormula(formula, value) {
+        try {
+            // 替换"值"为实际的value
+            let expression = formula.replace(/值/g, value.toString());
+
+            // 安全检查，确保只包含合法的数学表达式
+            if (!/^[0-9\s\+\-\*\/\(\)\.\,]*$/.test(expression)) {
+                console.error("Invalid expression: " + expression);
+                return value; // 如果表达式不合法，返回原值
+            }
+
+            // 使用Function构造器计算表达式
+            let result = new Function('return ' + expression)();
+            return parseFloat(result);
+        } catch (e) {
+            console.error("Expression evaluation error:", e);
+            return value; // 如果计算出错，返回原值
         }
     }
 
@@ -96,6 +118,8 @@ Window {
                 const itemId = groupKey + "_" + i;
                 let label = "Value " + (i + 1);
                 let unit = "";
+                let rawValue = groupData[i];
+                let displayValue = rawValue;
 
                 if (root.customLabels[itemId]) {
                     label = root.customLabels[itemId];
@@ -105,12 +129,19 @@ Window {
                     unit = root.customUnits[itemId];
                 }
 
+                // 应用自定义公式
+                if (root.customFormulas[itemId]) {
+                    displayValue = evaluateFormula(root.customFormulas[itemId], rawValue);
+                }
+
                 visualizationModel.append({
                     id: i,
                     itemId: itemId,
-                    value: groupData[i],
+                    rawValue: rawValue,
+                    displayValue: displayValue,
                     label: label,
-                    unit: unit
+                    unit: unit,
+                    formula: root.customFormulas[itemId] || ""
                 });
             }
         }
@@ -134,20 +165,28 @@ Window {
             width: 800
             height: 600
             title: ""
-            
+
             property string currentItemId: ""
             property bool isRecording: false
             property int recordInterval: 1000
-            
-            onClosing: {
-                isRecording = false;
-                if (dataHistory[currentItemId]) {
-                    dataHistory[currentItemId].isRecording = false;
-                    dataHistory[currentItemId].data = [];
-                }
-                recordTimer.stop();
-                updateTimer.stop();
-                lineSeries.clear();
+            property bool useKalmanFilter: false  // 卡尔曼滤波开关
+            property real kalmanQ: 1.0         // 过程噪声协方差
+            property real kalmanR: 1.0          // 测量噪声协方差
+            property real kalmanP: 1.0           // 估计误差协方差
+            property real kalmanX: 0.0           // 状态估计值
+            property int maxDataPoints: 100      // X轴最大显示点数
+
+            // 卡尔曼滤波函数
+            function kalmanFilter(measurement) {
+                // 预测步骤
+                kalmanP = kalmanP + kalmanQ;
+                
+                // 更新步骤
+                const kalmanK = kalmanP / (kalmanP + kalmanR);  // 卡尔曼增益
+                kalmanX = kalmanX + kalmanK * (measurement - kalmanX);
+                kalmanP = (1 - kalmanK) * kalmanP;
+                
+                return kalmanX;
             }
 
             ColumnLayout {
@@ -208,7 +247,96 @@ Window {
                             }
                         }
                     }
+
+                    CheckBox {
+                        text: "卡尔曼滤波"
+                        checked: chartWindow.useKalmanFilter
+                        onCheckedChanged: {
+                            chartWindow.useKalmanFilter = checked;
+                            // 重置卡尔曼滤波器状态
+                            kalmanP = 1.0;
+                            kalmanX = 0.0;
+                        }
+                    }
                 }
+
+                // X轴数据点控制面板
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Label { text: "X轴最大点数:" }
+                    SpinBox {
+                        id: maxPointsSpinBox
+                        from: 10
+                        to: 1000
+                        stepSize: 10
+                        value: chartWindow.maxDataPoints
+                        onValueChanged: {
+                            chartWindow.maxDataPoints = value;
+                        }
+                    }
+                }
+
+                // 卡尔曼滤波参数控制面板
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    visible: chartWindow.useKalmanFilter
+
+                    Label { text: "Q值(过程噪声):" }
+                    SpinBox {
+                        id: spinBoxQ
+                        from: 1  // 对应 0.01
+                        to: 10000  // 对应 100
+                        stepSize: 1  // 对应 0.01
+                        value: Math.round(chartWindow.kalmanQ * 100)
+                        editable: true
+
+                        property int decimals: 2
+                        onValueModified: {
+                            chartWindow.kalmanQ = value / 100;
+                            // 重置滤波器状态
+                            kalmanP = 1.0;
+                            kalmanX = 0.0;
+                        }
+
+                        textFromValue: function(value, locale) {
+                            return Number(value / 100).toLocaleString(locale, 'f', decimals)
+                        }
+
+                        valueFromText: function(text, locale) {
+                            return Math.round(Number.fromLocaleString(locale, text) * 100)
+                        }
+                    }
+
+                    Label { text: "R值(测量噪声):" }
+                    SpinBox {
+                        id: spinBoxR
+                        from: 1  // 对应 0.01
+                        to: 10000  // 对应 100
+                        stepSize: 1  // 对应 0.01
+                        value: Math.round(chartWindow.kalmanR * 100)
+                        editable: true
+
+                        property int decimals: 2
+                        onValueModified: {
+                            chartWindow.kalmanR = value / 100;
+                            // 重置滤波器状态
+                            kalmanP = 1.0;
+                            kalmanX = 0.0;
+                        }
+
+                        textFromValue: function(value, locale) {
+                            return Number(value / 100).toLocaleString(locale, 'f', decimals)
+                        }
+
+                        valueFromText: function(text, locale) {
+                            return Math.round(Number.fromLocaleString(locale, text) * 100)
+                        }
+                    }
+                }
+
 
                 // 图表视图
                 ChartView {
@@ -240,7 +368,7 @@ Window {
             // 图表更新定时器
             Timer {
                 id: updateTimer
-                interval: 500
+                interval: 300
                 running: chartWindow.visible && chartWindow.isRecording
                 repeat: true
                 onTriggered: {
@@ -248,21 +376,31 @@ Window {
                         const data = dataHistory[chartWindow.currentItemId].data;
                         lineSeries.clear();
                         if (data.length > 0) {
+                            // 限制数据点数量
+                            let displayData = data;
+                            if (data.length > chartWindow.maxDataPoints) {
+                                displayData = data.slice(data.length - chartWindow.maxDataPoints);
+                            }
+                            
                             // 更新X轴范围
-                            const firstTime = data[0].timestamp;
-                            const lastTime = data[data.length - 1].timestamp;
+                            const firstTime = displayData[0].timestamp;
+                            const lastTime = displayData[displayData.length - 1].timestamp;
                             axisX.min = new Date(firstTime);
                             axisX.max = new Date(lastTime);
 
                             // 更新Y轴范围
-                            let minY = data[0].value;
-                            let maxY = data[0].value;
+                            let minY = displayData[0].value;
+                            let maxY = displayData[0].value;
 
                             // 绘制数据点
-                            data.forEach(point => {
-                                lineSeries.append(point.timestamp, point.value);
-                                minY = Math.min(minY, point.value);
-                                maxY = Math.max(maxY, point.value);
+                            displayData.forEach(point => {
+                                let value = point.value;
+                                if (chartWindow.useKalmanFilter) {
+                                    value = chartWindow.kalmanFilter(value);
+                                }
+                                lineSeries.append(point.timestamp, value);
+                                minY = Math.min(minY, value);
+                                maxY = Math.max(maxY, value);
                             });
 
                             // 设置Y轴范围
@@ -293,9 +431,17 @@ Window {
                             const parts = chartWindow.currentItemId.split("_");
                             const index = parseInt(parts[parts.length-1]);
                             const now = Date.now();
+
+                            let valueToRecord = groupData[index];
+
+                            // 应用公式（如果有）
+                            if (root.customFormulas[chartWindow.currentItemId]) {
+                                valueToRecord = evaluateFormula(root.customFormulas[chartWindow.currentItemId], valueToRecord);
+                            }
+
                             dataHistory[chartWindow.currentItemId].data.push({
                                 timestamp: now,
-                                value: groupData[index]
+                                value: valueToRecord
                             });
                         }
                     }
@@ -307,7 +453,7 @@ Window {
     // 编辑对话框
     Dialog {
         id: editDialog
-        title: "Edit Data"
+        title: "编辑数据"
         modal: true
         anchors.centerIn: parent
         width: Math.min(parent.width * 0.8, 400)
@@ -315,15 +461,36 @@ Window {
 
         property int currentIndex: -1
         property string currentItemId: ""
+        property real currentRawValue: 0
         property string currentLabel: ""
         property string currentUnit: ""
+        property string currentFormula: ""
 
         onAccepted: {
             if (currentIndex >= 0 && currentIndex < visualizationModel.count) {
-                visualizationModel.setProperty(currentIndex, "label", labelEditField.text)
-                visualizationModel.setProperty(currentIndex, "unit", unitEditField.text)
+                // 保存标签和单位
                 root.customLabels[currentItemId] = labelEditField.text;
                 root.customUnits[currentItemId] = unitEditField.text;
+
+                // 保存公式
+                let formula = formulaEditField.text.trim();
+                if (formula.length > 0) {
+                    root.customFormulas[currentItemId] = formula;
+                } else {
+                    delete root.customFormulas[currentItemId];
+                }
+
+                // 计算新的显示值
+                let displayValue = currentRawValue;
+                if (formula.length > 0) {
+                    displayValue = evaluateFormula(formula, currentRawValue);
+                }
+
+                // 更新模型
+                visualizationModel.setProperty(currentIndex, "label", labelEditField.text);
+                visualizationModel.setProperty(currentIndex, "unit", unitEditField.text);
+                visualizationModel.setProperty(currentIndex, "formula", formula);
+                visualizationModel.setProperty(currentIndex, "displayValue", displayValue);
             }
         }
 
@@ -333,8 +500,14 @@ Window {
 
             RowLayout {
                 Layout.fillWidth: true
-                Label { text: "值:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
-                Label { id: valueDisplay; text: ""; font.pixelSize: 16; font.bold: true }
+                Label { text: "原始值:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
+                Label { id: rawValueDisplay; text: ""; font.pixelSize: 16; font.bold: true }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Label { text: "计算值:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
+                Label { id: calculatedValueDisplay; text: ""; font.pixelSize: 16; font.bold: true }
             }
 
             RowLayout {
@@ -346,26 +519,61 @@ Window {
             RowLayout {
                 Layout.fillWidth: true
                 Label { text: "标签:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
-                TextField { id: labelEditField; Layout.fillWidth: true; placeholderText: "输入 标签" }
+                TextField { id: labelEditField; Layout.fillWidth: true; placeholderText: "输入标签" }
             }
 
             RowLayout {
                 Layout.fillWidth: true
                 Label { text: "单位:"; Layout.preferredWidth: 80; font.pixelSize: 14 }
-                TextField { id: unitEditField; Layout.fillWidth: true; placeholderText: "输入 单位" }
+                TextField { id: unitEditField; Layout.fillWidth: true; placeholderText: "输入单位" }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 5
+
+                Label { text: "数学运算:"; font.pixelSize: 14 }
+                TextField {
+                    id: formulaEditField;
+                    Layout.fillWidth: true;
+                    placeholderText: "例如：(值+10)/7, 值*10, 值-5..."
+                    onTextChanged: {
+                        // 即时计算并显示结果
+                        if (text.trim().length > 0) {
+                            try {
+                                let result = evaluateFormula(text, editDialog.currentRawValue);
+                                calculatedValueDisplay.text = result.toFixed(2);
+                            } catch (e) {
+                                calculatedValueDisplay.text = "(公式错误)";
+                            }
+                        } else {
+                            calculatedValueDisplay.text = editDialog.currentRawValue.toFixed(2);
+                        }
+                    }
+                }
+
+                Label {
+                    text: "提示: 使用\"值\"作为原始数据的占位符。支持+, -, *, /, 和括号。"
+                    font.pixelSize: 12
+                    color: "#666666"
+                }
             }
         }
 
-        function openForEdit(index, itemId, value, label, unit) {
+        function openForEdit(index, itemId, rawValue, displayValue, label, unit, formula) {
             currentIndex = index
             currentItemId = itemId
+            currentRawValue = rawValue
             currentLabel = label
             currentUnit = unit
+            currentFormula = formula || ""
 
-            valueDisplay.text = value.toFixed(2)
+            rawValueDisplay.text = rawValue.toFixed(2)
+            calculatedValueDisplay.text = displayValue.toFixed(2)
             itemIdDisplay.text = itemId
             labelEditField.text = label
             unitEditField.text = unit
+            formulaEditField.text = currentFormula
 
             open()
             labelEditField.forceActiveFocus()
@@ -642,7 +850,7 @@ Window {
                                         }
 
                                         Text {
-                                            text: model.value.toFixed(2)
+                                            text: model.displayValue.toFixed(2)
                                             font.pixelSize: 16
                                             font.bold: true
                                             Layout.alignment: Qt.AlignLeft
@@ -670,13 +878,25 @@ Window {
                                             }
                                         }
                                     }
+
+                                    // 如果有公式，显示公式和原始值
+                                    Row {
+                                        visible: model.formula && model.formula.length > 0
+                                        spacing: 5
+
+                                        Text {
+                                            text: "公式: " + model.formula + " (原始值: " + model.rawValue.toFixed(2) + ")"
+                                            font.pixelSize: 12
+                                            color: "#666666"
+                                        }
+                                    }
                                 }
 
                                 MouseArea {
                                     anchors.fill: parent
                                     anchors.rightMargin: chartButton.width + 10
                                     onDoubleClicked: {
-                                        editDialog.openForEdit(index, model.itemId, model.value, model.label, model.unit)
+                                        editDialog.openForEdit(index, model.itemId, model.rawValue, model.displayValue, model.label, model.unit, model.formula)
                                     }
                                 }
                             }
