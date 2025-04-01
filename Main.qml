@@ -61,7 +61,7 @@ Window {
     function evaluateFormula(formula, value) {
         try {
             // 替换"值"为实际的value
-            let expression = formula.replace(/值/g, value.toString());
+            let expression = formula.replace(/X/g, value.toString());
 
             // 安全检查，确保只包含合法的数学表达式
             if (!/^[0-9\s\+\-\*\/\(\)\.\,]*$/.test(expression)) {
@@ -536,7 +536,7 @@ Window {
                 TextField {
                     id: formulaEditField;
                     Layout.fillWidth: true;
-                    placeholderText: "例如：(值+10)/7, 值*10, 值-5..."
+                    placeholderText: "例如：(X+10)/7..."
                     onTextChanged: {
                         // 即时计算并显示结果
                         if (text.trim().length > 0) {
@@ -553,7 +553,7 @@ Window {
                 }
 
                 Label {
-                    text: "提示: 使用\"值\"作为原始数据的占位符。支持+, -, *, /, 和括号。"
+                    text: "提示: 使用\"X\"作为原始数据的占位符。支持+, -, *, /, 和括号。"
                     font.pixelSize: 12
                     color: "#666666"
                 }
