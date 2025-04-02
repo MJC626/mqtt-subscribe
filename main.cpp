@@ -12,7 +12,7 @@ using namespace Qt::StringLiterals;
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    app.setWindowIcon(QIcon("C:/Users/23016/Documents/QT/quicksubscription/MJC.ico"));
+    app.setWindowIcon(QIcon(":/MJC.ico"));
     QQmlApplicationEngine engine;
 
     QObject::connect(
